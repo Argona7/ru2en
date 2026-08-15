@@ -331,6 +331,14 @@ local function fit()
   end)
 end
 
+-- A cache hit replaces the html one runloop tick after the loading state, so
+-- a fixed delay measures a document that has not laid out yet and the panel
+-- stays at its minimum height. The navigation callback is the only reliable
+-- signal; the timer is just a safety net if it never arrives.
+local function scheduleFit()
+  hs.timer.doAfter(0.2, fit)
+end
+
 function M.eval(js, callback)
   if view then
     view:evaluateJavaScript(js, callback)
@@ -512,10 +520,15 @@ function M.show(anchor)
   -- click-dragging a selection inside the text work.
   view:allowTextEntry(true)
   view:allowGestures(false)
+  view:navigationCallback(function(action)
+    if action == "didFinishNavigation" then
+      fit()
+    end
+  end)
   view:html(render('<span class="muted">перевожу…</span>', false))
   view:show()
 
-  hs.timer.doAfter(0.06, fit)
+  scheduleFit()
 
   escHotkey = hs.hotkey.bind({}, ESC_KEYCODE, M.close)
 
@@ -534,7 +547,7 @@ function M.setText(text)
   end
   currentText = text
   view:html(render(escapeHtml(text), true))
-  hs.timer.doAfter(0.06, fit)
+  scheduleFit()
 end
 
 function M.setError(msg)
@@ -543,7 +556,7 @@ function M.setError(msg)
   end
   currentText = nil
   view:html(render('<span class="muted">' .. escapeHtml(msg) .. "</span>", false))
-  hs.timer.doAfter(0.06, fit)
+  scheduleFit()
 end
 
 return M
