@@ -1,6 +1,10 @@
--- Floating reading panel. The window itself is transparent and borderless;
--- the rounded card and its shadow are drawn in CSS, which is why the frame
--- carries a padding margin around the visible card.
+-- Floating reading panel. The window is transparent and borderless; the
+-- rounded card and its shadow are drawn in CSS, so the frame carries a
+-- padding margin around the visible card.
+--
+-- Dragging and resizing are done in Lua rather than by the window server:
+-- a borderless nonactivating panel has no titlebar to grab and no native
+-- resize edge, so a single mouse tap drives both.
 
 local config = require("ru2en.config")
 
@@ -8,12 +12,24 @@ local M = {}
 
 local view = nil
 local escHotkey = nil
-local clickTap = nil
+local mouseTap = nil
 local anchorRect = nil
 local currentText = nil
+local dragMode = nil
+local dragOrigin = nil
+
+-- Size the user dragged to, kept for the rest of the session. Nil means the
+-- panel keeps sizing itself to its content.
+local userSize = nil
 
 -- kVK_Escape. Bound by keycode so the layout never matters.
 local ESC_KEYCODE = 53
+
+-- Must match the CSS below: these are the grab targets.
+local HEADER_H = 34
+local GRIP = 22
+local MIN_CARD_W = 320
+local MIN_CARD_H = 150
 
 local TEMPLATE = [[<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
@@ -21,77 +37,130 @@ local TEMPLATE = [[<!DOCTYPE html>
 html, body { height:100%; background:transparent; }
 body {
   padding:__PAD__px;
-  display:flex; align-items:flex-start;
   -webkit-font-smoothing:antialiased;
-  /* a reading panel should never pick up a stray drag-selection */
   -webkit-user-select:none;
   cursor:default;
 }
 #card {
-  width:__W__px;
-  max-height:100%;
+  width:100%; height:100%;
   display:flex; flex-direction:column;
-  background:#FBFAF7;
-  border:0.5px solid rgba(0,0,0,0.12);
-  border-radius:14px;
-  box-shadow:0 12px 38px rgba(0,0,0,0.20), 0 2px 8px rgba(0,0,0,0.10);
+  background:#FCFBF9;
+  border:0.5px solid rgba(20,18,14,0.10);
+  border-radius:16px;
+  box-shadow:
+    0 1px 2px rgba(0,0,0,0.04),
+    0 8px 24px rgba(0,0,0,0.10),
+    0 24px 56px rgba(0,0,0,0.11);
   overflow:hidden;
-  color:#1B1A17;
+  color:#1A1815;
 }
+
+#head {
+  position:relative; flex:0 0 __HEADH__px;
+  display:flex; align-items:center; justify-content:center;
+  border-bottom:0.5px solid rgba(20,18,14,0.07);
+  cursor:grab;
+}
+#head:active { cursor:grabbing; }
+#grab { width:34px; height:4px; border-radius:2px; background:rgba(20,18,14,0.16); }
+#close {
+  position:absolute; right:9px; top:50%; transform:translateY(-50%);
+  width:23px; height:23px; padding:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:12px; line-height:1;
+  border:0; border-radius:7px; background:transparent;
+  color:rgba(20,18,14,0.34); cursor:pointer;
+  transition:background 130ms ease, color 130ms ease;
+}
+#close:hover { background:rgba(20,18,14,0.08); color:rgba(20,18,14,0.72); }
+#close:active { background:rgba(20,18,14,0.14); }
+
 #text {
-  padding:22px 26px 18px;
-  overflow-y:auto;
+  flex:1 1 auto; min-height:0; overflow-y:auto;
+  padding:20px 26px 20px;
   font-family:ui-serif, "New York", Georgia, serif;
   font-size:__FS__px;
   line-height:1.62;
   white-space:pre-wrap;
   overflow-wrap:break-word;
 }
-#text::-webkit-scrollbar { width:9px; }
+#text::-webkit-scrollbar { width:10px; }
 #text::-webkit-scrollbar-thumb {
-  background:rgba(0,0,0,0.16); border-radius:5px;
+  background:rgba(20,18,14,0.15); border-radius:5px;
   border:3px solid transparent; background-clip:content-box;
 }
-.muted { color:rgba(0,0,0,0.42); font-style:italic; }
-#bar {
-  display:flex; align-items:center; justify-content:space-between; gap:10px;
-  padding:10px 14px 11px 20px;
-  border-top:0.5px solid rgba(0,0,0,0.08);
+#text::-webkit-scrollbar-thumb:hover { background:rgba(20,18,14,0.26); background-clip:content-box; }
+.muted { color:rgba(20,18,14,0.40); font-style:italic; }
+
+#foot {
+  position:relative; flex:0 0 46px;
+  display:flex; align-items:center;
+  padding:0 18px;
+  border-top:0.5px solid rgba(20,18,14,0.07);
 }
-button {
+#copy {
   font-family:-apple-system, system-ui, sans-serif;
-  font-size:12.5px; line-height:1;
-  border:0.5px solid rgba(0,0,0,0.16);
-  background:rgba(0,0,0,0.035);
-  border-radius:7px; padding:6px 12px;
-  color:#3A3833; cursor:pointer;
+  font-size:12.5px; font-weight:500; line-height:1;
+  border:0.5px solid rgba(20,18,14,0.11);
+  background:rgba(20,18,14,0.045);
+  border-radius:8px; padding:7px 14px;
+  color:#37342E; cursor:pointer;
+  transition:background 130ms ease, border-color 130ms ease, color 130ms ease;
 }
-button:hover { background:rgba(0,0,0,0.07); }
-button:active { background:rgba(0,0,0,0.12); }
-#close { padding:6px 10px; color:rgba(0,0,0,0.42); }
+#copy:hover { background:rgba(20,18,14,0.085); border-color:rgba(20,18,14,0.17); }
+#copy:active { background:rgba(20,18,14,0.13); }
+#copy.done {
+  background:rgba(47,107,68,0.11); border-color:rgba(47,107,68,0.26); color:#2F6B44;
+}
+#grip {
+  position:absolute; right:0; bottom:0;
+  width:__GRIP__px; height:__GRIP__px;
+  cursor:nwse-resize;
+}
+#grip::after {
+  content:""; position:absolute; right:5px; bottom:5px; width:11px; height:11px;
+  background:repeating-linear-gradient(135deg,
+    rgba(20,18,14,0.26) 0 1.5px, transparent 1.5px 4px);
+}
+
 @media (prefers-color-scheme:dark) {
   #card {
-    background:#1E1D1B; border-color:rgba(255,255,255,0.10); color:#E9E6E0;
-    box-shadow:0 12px 38px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.35);
+    background:#1C1B19; border-color:rgba(255,255,255,0.09); color:#E8E4DD;
+    box-shadow:
+      0 1px 2px rgba(0,0,0,0.30),
+      0 8px 24px rgba(0,0,0,0.45),
+      0 24px 56px rgba(0,0,0,0.40);
   }
-  #bar { border-top-color:rgba(255,255,255,0.09); }
-  button { background:rgba(255,255,255,0.07); border-color:rgba(255,255,255,0.14); color:#D9D5CE; }
-  button:hover { background:rgba(255,255,255,0.12); }
-  #close { color:rgba(255,255,255,0.42); }
+  #head { border-bottom-color:rgba(255,255,255,0.08); }
+  #grab { background:rgba(255,255,255,0.18); }
+  #close { color:rgba(255,255,255,0.36); }
+  #close:hover { background:rgba(255,255,255,0.10); color:rgba(255,255,255,0.80); }
+  #close:active { background:rgba(255,255,255,0.16); }
+  #foot { border-top-color:rgba(255,255,255,0.08); }
+  #copy { background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.12); color:#DAD6CF; }
+  #copy:hover { background:rgba(255,255,255,0.11); border-color:rgba(255,255,255,0.19); }
+  #copy:active { background:rgba(255,255,255,0.16); }
+  #copy.done { background:rgba(120,200,150,0.13); border-color:rgba(120,200,150,0.28); color:#8FD5AC; }
+  #text::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.17); background-clip:content-box; }
+  #text::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.28); background-clip:content-box; }
   .muted { color:rgba(255,255,255,0.40); }
-  #text::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.20); background-clip:content-box; }
+  #grip::after {
+    background:repeating-linear-gradient(135deg,
+      rgba(255,255,255,0.28) 0 1.5px, transparent 1.5px 4px);
+  }
 }
 </style></head><body>
 <div id="card">
+  <div id="head"><div id="grab"></div><button id="close" title="Esc">&#10005;</button></div>
   <div id="text">__BODY__</div>
-  __BAR__
+  __FOOT__
 </div>
 <script>
 function send(m){ window.webkit.messageHandlers.ru2enReader.postMessage(m); }
 function flashCopied(){
   var b=document.getElementById('copy'); if(!b) return;
-  b.textContent='Скопировано';
-  setTimeout(function(){ b.textContent='Скопировать'; }, 1300);
+  b.textContent='Скопировано'; b.classList.add('done');
+  setTimeout(function(){ b.textContent='Скопировать'; b.classList.remove('done'); }, 1400);
 }
 (function(){
   var s=window.getSelection(); if(s) s.removeAllRanges();
@@ -103,10 +172,17 @@ function flashCopied(){
 </script>
 </body></html>]]
 
-local BAR = [[<div id="bar">
+local FOOT = [[<div id="foot">
     <button id="copy">Скопировать</button>
-    <button id="close" title="Esc">&#10005;</button>
+    <div id="grip"></div>
   </div>]]
+
+local MEASURE_JS = [[(function(){
+  var t = document.getElementById('text');
+  var h = document.getElementById('head');
+  var f = document.getElementById('foot');
+  return t.scrollHeight + (h ? h.offsetHeight : 0) + (f ? f.offsetHeight : 0) + 2;
+})()]]
 
 local function escapeHtml(s)
   local out = string.gsub(s, "&", "&amp;")
@@ -116,14 +192,15 @@ local function escapeHtml(s)
 end
 
 -- Function replacements on purpose: the translated text is arbitrary and a
--- literal % in it would be read as a capture reference.
-local function render(bodyHtml, withBar)
+-- literal % in it would otherwise be read as a capture reference.
+local function render(bodyHtml, withFoot)
   local vars = {
     PAD = tostring(config.reader.padding),
-    W = tostring(config.reader.width),
     FS = tostring(config.reader.font_size),
+    HEADH = tostring(HEADER_H),
+    GRIP = tostring(GRIP),
     BODY = bodyHtml,
-    BAR = withBar and BAR or "",
+    FOOT = withFoot and FOOT or "",
   }
   return (string.gsub(TEMPLATE, "__(%u+)__", function(k)
     return vars[k] or ""
@@ -133,51 +210,49 @@ end
 local function place(cardHeight)
   local r = config.reader
   local pad = r.padding
+  local margin = 10
   local screen = hs.mouse.getCurrentScreen() or hs.screen.mainScreen()
   local sf = screen:frame()
 
-  local winW = r.width + pad * 2
+  local cardW = userSize and userSize.w or r.width
   local maxCard = math.floor(sf.h * r.max_height_fraction)
-  local winH = math.max(r.min_height, math.min(cardHeight, maxCard)) + pad * 2
+  local cardH = userSize and userSize.h or math.max(r.min_height, math.min(cardHeight, maxCard))
+  cardH = math.min(cardH, sf.h - 2 * margin - pad * 2)
 
-  local a = anchorRect or { x = sf.x + sf.w / 2, y = sf.y + sf.h / 3, w = 0, h = 0 }
-
-  -- pad is subtracted so the visible gap between card and selection is
-  -- exactly r.gap rather than r.gap plus the invisible shadow margin.
-  local rightX = a.x + a.w + r.gap - pad
-  local leftX = a.x - r.gap - winW + pad
+  local winW, winH = cardW + pad * 2, cardH + pad * 2
+  local a = anchorRect or { x = sf.x + sf.w / 2, y = sf.y + sf.h / 3, w = 0, h = 0, dock = true }
 
   local x
-  if rightX + winW <= sf.x + sf.w - 8 then
-    x = rightX
-  elseif leftX >= sf.x + 8 then
-    x = leftX
+  local besideRight = a.x + a.w + r.gap
+  local besideLeft = a.x - r.gap - cardW
+
+  if not a.dock and besideRight + cardW <= sf.x + sf.w - margin then
+    x = besideRight - pad
+  elseif not a.dock and besideLeft >= sf.x + margin then
+    x = besideLeft - pad
   else
-    x = sf.x + sf.w - winW - 8
+    -- No room beside the selection, or no idea where it is. Dock to the far
+    -- side of the screen so the panel cannot sit on top of what is being read.
+    if a.x + a.w / 2 <= sf.x + sf.w / 2 then
+      x = sf.x + sf.w - margin - cardW - pad
+    else
+      x = sf.x + margin - pad
+    end
   end
 
   local y = a.y - pad
-  if y + winH > sf.y + sf.h - 8 then
-    y = sf.y + sf.h - winH - 8
+  if y + winH > sf.y + sf.h - margin then
+    y = sf.y + sf.h - margin - winH
   end
-  if y < sf.y + 8 then
-    y = sf.y + 8
+  if y < sf.y + margin then
+    y = sf.y + margin
   end
 
   return { x = x, y = y, w = winW, h = winH }
 end
 
--- Measures the text's unclipped scrollHeight rather than the card's own
--- height: the card is capped at max-height:100%, so asking it how tall it is
--- would only ever echo back the window size the panel already has.
-local MEASURE_JS = [[(function(){
-  var t = document.getElementById('text');
-  var b = document.getElementById('bar');
-  return t.scrollHeight + (b ? b.offsetHeight : 0) + 2;
-})()]]
-
 local function fit()
-  if not view then
+  if not view or userSize then
     return
   end
   view:evaluateJavaScript(MEASURE_JS, function(result)
@@ -188,6 +263,23 @@ local function fit()
   end)
 end
 
+local function zoneAt(point, frame)
+  local pad = config.reader.padding
+  local cx, cy = frame.x + pad, frame.y + pad
+  local cw, ch = frame.w - pad * 2, frame.h - pad * 2
+
+  if point.x < cx or point.x > cx + cw or point.y < cy or point.y > cy + ch then
+    return nil
+  end
+  if point.x >= cx + cw - GRIP and point.y >= cy + ch - GRIP then
+    return "resize"
+  end
+  if point.y <= cy + HEADER_H then
+    return "move"
+  end
+  return nil
+end
+
 function M.isOpen()
   return view ~= nil
 end
@@ -196,19 +288,24 @@ function M.frame()
   return view and view:frame() or nil
 end
 
+function M.resetSize()
+  userSize = nil
+end
+
 function M.close()
   if escHotkey then
     escHotkey:delete()
     escHotkey = nil
   end
-  if clickTap then
-    clickTap:stop()
-    clickTap = nil
+  if mouseTap then
+    mouseTap:stop()
+    mouseTap = nil
   end
   if view then
     view:delete()
     view = nil
   end
+  dragMode = nil
   currentText = nil
 end
 
@@ -230,6 +327,60 @@ local function newController()
   return controller
 end
 
+local function onMouse(event)
+  if not view then
+    return false
+  end
+
+  local types = hs.eventtap.event.types
+  local kind = event:getType()
+  -- From the event, not the cursor: the event carries the exact location the
+  -- click happened at, which also keeps synthetic events honest in tests.
+  local point = event:location() or hs.mouse.absolutePosition()
+
+  if kind == types.leftMouseDown then
+    local frame = view:frame()
+    local zone = zoneAt(point, frame)
+    if zone then
+      dragMode = zone
+      dragOrigin = { mx = point.x, my = point.y, x = frame.x, y = frame.y, w = frame.w, h = frame.h }
+      return false
+    end
+    local inside = point.x >= frame.x and point.x <= frame.x + frame.w
+      and point.y >= frame.y and point.y <= frame.y + frame.h
+    if not inside and config.reader.close_on_click_outside then
+      M.close()
+    end
+    return false
+  end
+
+  if not dragMode then
+    return false
+  end
+
+  if kind == types.leftMouseDragged then
+    local pad = config.reader.padding
+    local dx, dy = point.x - dragOrigin.mx, point.y - dragOrigin.my
+    if dragMode == "move" then
+      view:frame({ x = dragOrigin.x + dx, y = dragOrigin.y + dy, w = dragOrigin.w, h = dragOrigin.h })
+    else
+      local w = math.max(MIN_CARD_W + pad * 2, dragOrigin.w + dx)
+      local h = math.max(MIN_CARD_H + pad * 2, dragOrigin.h + dy)
+      view:frame({ x = dragOrigin.x, y = dragOrigin.y, w = w, h = h })
+      userSize = { w = w - pad * 2, h = h - pad * 2 }
+    end
+    -- Swallowed so the app underneath does not start selecting text.
+    return true
+  end
+
+  if kind == types.leftMouseUp then
+    dragMode = nil
+    return true
+  end
+
+  return false
+end
+
 function M.show(anchor)
   M.close()
   anchorRect = anchor
@@ -248,20 +399,12 @@ function M.show(anchor)
 
   escHotkey = hs.hotkey.bind({}, ESC_KEYCODE, M.close)
 
-  if config.reader.close_on_click_outside then
-    clickTap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function()
-      if not view then
-        return false
-      end
-      local p = hs.mouse.absolutePosition()
-      local f = view:frame()
-      if p.x < f.x or p.x > f.x + f.w or p.y < f.y or p.y > f.y + f.h then
-        M.close()
-      end
-      return false
-    end)
-    clickTap:start()
-  end
+  mouseTap = hs.eventtap.new({
+    hs.eventtap.event.types.leftMouseDown,
+    hs.eventtap.event.types.leftMouseDragged,
+    hs.eventtap.event.types.leftMouseUp,
+  }, onMouse)
+  mouseTap:start()
 end
 
 function M.setText(text)

@@ -2,8 +2,12 @@
 -- which is where most of the speed comes from.
 
 local config = require("ru2en.config")
+local cache = require("ru2en.cache")
 
 local M = {}
+
+M.cache = cache
+cache.ttl = config.cache_ttl_s or cache.ttl
 
 local apiKey = nil
 
@@ -47,13 +51,28 @@ function M.request(opts, onDone, onError)
     return function() end
   end
 
+  local model = opts.model or config.model
+  local cacheKey = model .. "\0" .. (opts.system or "") .. "\0" .. opts.text
+
+  if opts.cache ~= false then
+    local hit = cache.get(cacheKey)
+    if hit then
+      -- Deferred by a tick so a cache hit follows the same async path as the
+      -- network, and callers that open a panel first still get it in order.
+      hs.timer.doAfter(0, function()
+        onDone(hit, 0, true)
+      end)
+      return function() end
+    end
+  end
+
   local timeout = opts.timeout_s or config.timeout_s
   local started = hs.timer.secondsSinceEpoch()
   local done = false
   local timer
 
   local body = hs.json.encode({
-    model = opts.model or config.model,
+    model = model,
     temperature = opts.temperature or config.temperature,
     messages = {
       { role = "system", content = opts.system },
@@ -95,7 +114,10 @@ function M.request(opts, onDone, onError)
       return onError(type(err) == "table" and tostring(err.message) or "empty response")
     end
 
-    onDone(content, hs.timer.secondsSinceEpoch() - started)
+    if opts.cache ~= false then
+      cache.put(cacheKey, content)
+    end
+    onDone(content, hs.timer.secondsSinceEpoch() - started, false)
   end)
 
   return function()

@@ -50,12 +50,17 @@ local function selectionAnchor()
     return element:parameterizedAttributeValue("AXBoundsForRange", range)
   end)
 
-  if ok and type(bounds) == "table" and tonumber(bounds.w) and tonumber(bounds.w) > 0 then
-    return { x = bounds.x, y = bounds.y, w = bounds.w, h = bounds.h }
+  local w = ok and type(bounds) == "table" and tonumber(bounds.w) or nil
+  local h = ok and type(bounds) == "table" and tonumber(bounds.h) or nil
+  if w and h and w > 1 and h > 1 then
+    return { x = bounds.x, y = bounds.y, w = w, h = h }
   end
 
+  -- Without real bounds the cursor is a bad guess: it sits in the middle of
+  -- the text the user just selected, so a panel placed beside it lands on
+  -- top of what they want to read. Ask for a dock to the far edge instead.
   local point = hs.mouse.absolutePosition()
-  return { x = point.x, y = point.y, w = 0, h = 0 }
+  return { x = point.x, y = point.y, w = 0, h = 0, dock = true }
 end
 
 local function clean(text, original)

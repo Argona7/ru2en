@@ -14,6 +14,11 @@ return {
   timeout_s = 8,
   max_chars = 8000,
 
+  -- Repeat translations of the same text are served from memory instead of
+  -- the network. Cleared on every config reload, so an edited prompt can
+  -- never keep serving old output.
+  cache_ttl_s = 3600,
+
   show_spinner = true,
   -- Hotkeys carry hardware keycodes, not letters: hs.keycodes resolves
   -- against the active layout and warns on every bind while a cyrillic
