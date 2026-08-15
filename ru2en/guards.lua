@@ -23,6 +23,10 @@ function M.has_cyrillic(s)
   return string.find(s, "[\208\209]") ~= nil
 end
 
+function M.has_latin(s)
+  return string.find(s, "[A-Za-z]") ~= nil
+end
+
 function M.split_lines(s)
   local lines = {}
   local start = 1

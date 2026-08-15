@@ -3,6 +3,8 @@
 
 local config = require("ru2en.config")
 local guards = require("ru2en.guards")
+local api = require("ru2en.api")
+local selection = require("ru2en.selection")
 
 local M = {}
 
@@ -14,14 +16,8 @@ end
 
 local PROMPT_PATH = moduleDir() .. "/prompt.txt"
 
+M.dir = moduleDir()
 M.root = string.match(moduleDir(), "^(.*)/[^/]+$")
-
--- kVK_ANSI_C and kVK_ANSI_V. Hardcoded on purpose: hs.keycodes.map resolves
--- against the active keyboard layout and warns on every lookup while a
--- cyrillic layout is on, which is exactly when this tool gets used. Hardware
--- keycodes are layout independent.
-local KEYCODE_C = 8
-local KEYCODE_V = 9
 
 local ALERT_STYLE = {
   strokeWidth = 0,
@@ -31,46 +27,16 @@ local ALERT_STYLE = {
   radius = 10,
 }
 
-local apiKey = nil
 local inFlight = false
-local generation = 0
 local spinnerId = nil
 local lastCmdC = 0
-local synthesizing = false
 local tap = nil
 local hotkeys = {}
+local reader = nil
 
 M.lastOriginal = nil
 M.lastElapsed = nil
 M.cmdCSeen = 0
-
-local function readPrompt()
-  local f = io.open(PROMPT_PATH, "r")
-  if not f then
-    return nil
-  end
-  local body = f:read("*a")
-  f:close()
-  return (string.gsub(body, "%s+$", ""))
-end
-
-local function getApiKey()
-  if apiKey then
-    return apiKey
-  end
-  local out, ok = hs.execute(
-    "/usr/bin/security find-generic-password -s '" .. config.keychain_service .. "' -w 2>/dev/null"
-  )
-  if not ok or type(out) ~= "string" then
-    return nil
-  end
-  local key = string.gsub(out, "%s+$", "")
-  if key == "" then
-    return nil
-  end
-  apiKey = key
-  return apiKey
-end
 
 local function hideSpinner()
   if spinnerId then
@@ -93,97 +59,36 @@ local function fail(msg)
   print("ru2en error: " .. msg)
 end
 
-local function postKey(mods, keycode)
-  hs.eventtap.event.newKeyEvent(mods, keycode, true):post()
-  hs.timer.usleep(20000)
-  hs.eventtap.event.newKeyEvent(mods, keycode, false):post()
-end
+M.alertStyle = ALERT_STYLE
+M.fail = fail
 
 local function paste(text)
   hs.pasteboard.setContents(text)
   hs.timer.doAfter(config.paste_delay_ms / 1000, function()
-    postKey({ "cmd" }, KEYCODE_V)
+    selection.postKey({ "cmd" }, selection.KEY_V)
   end)
-end
-
--- The triggering Cmd+C has already put the selection on the pasteboard, so we
--- wait for changeCount to move rather than copying a second time.
-local function afterPasteboardSettles(baseline, fn)
-  local deadline = hs.timer.secondsSinceEpoch() + config.pasteboard_wait_ms / 1000
-  local function poll()
-    if hs.pasteboard.changeCount() > baseline or hs.timer.secondsSinceEpoch() >= deadline then
-      fn()
-    else
-      hs.timer.doAfter(0.015, poll)
-    end
-  end
-  hs.timer.doAfter(0.015, poll)
 end
 
 function M.translate(original, onDone)
   onDone = onDone or paste
 
-  local key = getApiKey()
-  if not key then
-    return fail("no key in keychain under '" .. config.keychain_service .. "'")
-  end
-  local prompt = readPrompt()
+  local prompt = api.readPromptFile(PROMPT_PATH)
   if not prompt then
     return fail("cannot read " .. PROMPT_PATH)
   end
 
-  generation = generation + 1
-  local myGen = generation
   inFlight = true
   M.lastOriginal = original
   showSpinner()
 
-  local started = hs.timer.secondsSinceEpoch()
-
-  local body = hs.json.encode({
-    model = config.model,
-    temperature = config.temperature,
-    messages = {
-      { role = "system", content = prompt },
-      { role = "user", content = original },
-    },
-  })
-
-  hs.timer.doAfter(config.timeout_s, function()
-    if inFlight and generation == myGen then
-      inFlight = false
-      fail("timeout after " .. config.timeout_s .. "s")
-    end
-  end)
-
-  hs.http.asyncPost(config.endpoint, body, {
-    ["Content-Type"] = "application/json",
-    ["Authorization"] = "Bearer " .. key,
-  }, function(status, respBody)
-    if generation ~= myGen or not inFlight then
-      return
-    end
+  api.request({ system = prompt, text = original }, function(content, elapsed)
     inFlight = false
     hideSpinner()
-
-    if status ~= 200 then
-      return fail("http " .. tostring(status) .. ": " .. string.sub(tostring(respBody), 1, 140))
-    end
-
-    local ok, decoded = pcall(hs.json.decode, respBody)
-    if not ok or type(decoded) ~= "table" then
-      return fail("unparseable response")
-    end
-
-    local choice = decoded.choices and decoded.choices[1]
-    local content = choice and choice.message and choice.message.content
-    if type(content) ~= "string" or content == "" then
-      local err = decoded.error
-      return fail(type(err) == "table" and tostring(err.message) or "empty response")
-    end
-
-    M.lastElapsed = hs.timer.secondsSinceEpoch() - started
-    onDone(guards.apply(content, original), M.lastElapsed)
+    M.lastElapsed = elapsed
+    onDone(guards.apply(content, original), elapsed)
+  end, function(err)
+    inFlight = false
+    fail(err)
   end)
 end
 
@@ -218,13 +123,7 @@ function M.forceTranslate()
   if inFlight then
     return
   end
-  local baseline = hs.pasteboard.changeCount()
-  synthesizing = true
-  postKey({ "cmd" }, KEYCODE_C)
-  hs.timer.doAfter(0.15, function()
-    synthesizing = false
-  end)
-  afterPasteboardSettles(baseline, function()
+  selection.capture({ restore = false }, function()
     M.translateClipboard({ force = true })
   end)
 end
@@ -237,16 +136,19 @@ function M.rollback()
 end
 
 function M.doctor()
-  local prompt = readPrompt()
+  local prompt = api.readPromptFile(PROMPT_PATH)
   local report = table.concat({
     "accessibility:    " .. tostring(hs.accessibilityState()),
     "eventtap running: " .. tostring(tap ~= nil and tap:isEnabled() or false),
-    "hotkeys bound:    " .. #hotkeys,
-    "api key:          " .. (getApiKey() and "found in keychain" or "MISSING"),
+    "hotkeys bound:    " .. #hs.hotkey.getHotkeys(),
+    "api key:          " .. (api.key() and "found in keychain" or "MISSING"),
     "prompt:           " .. (prompt and (#prompt .. " chars") or "MISSING"),
+    "reader prompt:    " .. (api.readPromptFile(M.dir .. "/prompt.reader.txt") and "loaded" or "MISSING"),
+    "reader panel:     " .. (reader and "armed" or "not started"),
     "model:            " .. config.model,
     "cmd+c seen:       " .. M.cmdCSeen,
     "last latency:     " .. (M.lastElapsed and string.format("%.2fs", M.lastElapsed) or "n/a"),
+    "reader latency:   " .. (reader and reader.lastElapsed and string.format("%.2fs", reader.lastElapsed) or "n/a"),
   }, "\n")
   return report
 end
@@ -259,10 +161,10 @@ function M.benchmark(text)
 end
 
 local function onKey(event)
-  if synthesizing then
+  if selection.isSynthesizing() then
     return false
   end
-  if event:getKeyCode() ~= KEYCODE_C then
+  if event:getKeyCode() ~= selection.KEY_C then
     return false
   end
   if not event:getFlags():containExactly({ "cmd" }) then
@@ -275,7 +177,7 @@ local function onKey(event)
   if (now - lastCmdC) * 1000 <= config.double_tap_ms then
     lastCmdC = 0
     local baseline = hs.pasteboard.changeCount()
-    afterPasteboardSettles(baseline, function()
+    selection.afterPasteboardSettles(baseline, function()
       M.translateClipboard()
     end)
   else
@@ -294,6 +196,9 @@ function M.stop()
     hk:delete()
   end
   hotkeys = {}
+  if reader then
+    reader.stop()
+  end
 end
 
 function M.start()
@@ -302,12 +207,11 @@ function M.start()
   tap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, onKey)
   tap:start()
 
-  if config.force_hotkey then
-    hotkeys[#hotkeys + 1] = hs.hotkey.bind(config.force_hotkey.mods, config.force_hotkey.key, M.forceTranslate)
-  end
-  if config.rollback_hotkey then
-    hotkeys[#hotkeys + 1] = hs.hotkey.bind(config.rollback_hotkey.mods, config.rollback_hotkey.key, M.rollback)
-  end
+  hotkeys[#hotkeys + 1] = selection.bindHotkey(config.force_hotkey, M.forceTranslate)
+  hotkeys[#hotkeys + 1] = selection.bindHotkey(config.rollback_hotkey, M.rollback)
+
+  reader = require("ru2en.reader")
+  reader.start()
 
   return M
 end

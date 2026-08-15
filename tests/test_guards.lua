@@ -38,6 +38,13 @@ eq("cyrillic: mixed", guards.has_cyrillic("hello мир"), true)
 eq("cyrillic: digits and punct", guards.has_cyrillic("1. foo - bar (baz)"), false)
 eq("cyrillic: emoji only", guards.has_cyrillic("ok \240\159\154\128"), false)
 
+-- latin detection gates the reading panel
+eq("latin: english", guards.has_latin("hello world"), true)
+eq("latin: russian only", guards.has_latin("привет мир"), false)
+eq("latin: mixed", guards.has_latin("привет world"), true)
+eq("latin: digits and punct only", guards.has_latin("1. 200$ - 300$ (!)"), false)
+eq("latin: single letter", guards.has_latin("ок a"), true)
+
 -- newline normalization
 eq("crlf", guards.normalize_newlines("a\r\nb"), "a\nb")
 eq("cr", guards.normalize_newlines("a\rb"), "a\nb")
