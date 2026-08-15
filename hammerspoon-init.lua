@@ -1,5 +1,5 @@
--- Loader for ~/.hammerspoon/init.lua. install.sh substitutes __REPO_DIR__
--- with the absolute path of the checkout.
+-- Template for ~/.hammerspoon/init.lua. install.sh fills the placeholder
+-- below with the absolute path of the checkout.
 
 local ROOT = "__REPO_DIR__"
 package.path = ROOT .. "/?.lua;" .. ROOT .. "/?/init.lua;" .. package.path

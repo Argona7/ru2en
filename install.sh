@@ -9,6 +9,11 @@ LOADER="$HOME/.hammerspoon/init.lua"
 
 say() { printf '==> %s\n' "$1"; }
 
+# macOS ships no timeout(1). Hammerspoon stops answering the ipc socket while
+# it holds a modal permission dialog, so every hs call needs a cap or the
+# installer hangs forever on a machine nobody is sitting at.
+run_capped() { perl -e 'alarm shift; exec @ARGV' "$@" 2>/dev/null; }
+
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "ru2en is macOS only" >&2
   exit 1
@@ -61,11 +66,10 @@ if ! open /Applications/Hammerspoon.app 2>/dev/null; then
 fi
 sleep 6
 
+granted="unknown"
 if command -v hs >/dev/null 2>&1; then
-  hs -c 'hs.autoLaunch(true)' >/dev/null 2>&1 || true
-  granted="$(hs -c 'return tostring(hs.accessibilityState())' 2>/dev/null | tr -d '\n\r ')"
-else
-  granted="unknown"
+  run_capped 6 hs -c 'hs.autoLaunch(true)' >/dev/null || true
+  granted="$(run_capped 6 hs -c 'return tostring(hs.accessibilityState())' | tr -d '\n\r ')"
 fi
 
 say "done"
@@ -73,8 +77,11 @@ echo
 if [ "$granted" = "true" ]; then
   echo "Accessibility is granted. Select russian text and hit Cmd+C twice."
 else
-  echo "One step left: grant Accessibility to Hammerspoon."
+  echo "One step left, and it has to be done on the machine's own screen:"
   echo "  System Settings -> Privacy & Security -> Accessibility -> enable Hammerspoon"
-  echo "Then restart it, macOS only reads the permission at launch:"
-  echo "  killall Hammerspoon; sleep 2; open -a Hammerspoon"
+  echo
+  echo "macOS only reads that permission at launch, so restart it afterwards:"
+  echo "  killall Hammerspoon; sleep 2; open /Applications/Hammerspoon.app"
+  echo
+  echo "Verify with:  hs -c 'require(\"ru2en\").doctor()'"
 fi
