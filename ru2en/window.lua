@@ -2,9 +2,10 @@
 -- rounded card and its shadow are drawn in CSS, so the frame carries a
 -- padding margin around the visible card.
 --
--- Dragging and resizing are done in Lua rather than by the window server:
--- a borderless nonactivating panel has no titlebar to grab and no native
--- resize edge, so a single mouse tap drives both.
+-- Two things a nonactivating panel does not get for free, both handled here
+-- by the mouse tap: dragging and resizing (no titlebar, no native resize
+-- edge) and hover (the window never receives mouseMoved, so CSS :hover
+-- alone would never fire).
 
 local config = require("ru2en.config")
 
@@ -17,6 +18,9 @@ local anchorRect = nil
 local currentText = nil
 local dragMode = nil
 local dragOrigin = nil
+local hoverId = nil
+local controls = nil
+local frameCache = nil
 
 -- Size the user dragged to, kept for the rest of the session. Nil means the
 -- panel keeps sizing itself to its content.
@@ -72,8 +76,8 @@ body {
   color:rgba(20,18,14,0.34); cursor:pointer;
   transition:background 130ms ease, color 130ms ease;
 }
-#close:hover { background:rgba(20,18,14,0.08); color:rgba(20,18,14,0.72); }
-#close:active { background:rgba(20,18,14,0.14); }
+#close:hover, #close.hover { background:rgba(20,18,14,0.08); color:rgba(20,18,14,0.72); }
+#close:active, #close.press { background:rgba(20,18,14,0.15); }
 
 #text {
   flex:1 1 auto; min-height:0; overflow-y:auto;
@@ -83,7 +87,10 @@ body {
   line-height:1.62;
   white-space:pre-wrap;
   overflow-wrap:break-word;
+  -webkit-user-select:text;
+  cursor:text;
 }
+#text::selection { background:rgba(56,116,214,0.24); }
 #text::-webkit-scrollbar { width:10px; }
 #text::-webkit-scrollbar-thumb {
   background:rgba(20,18,14,0.15); border-radius:5px;
@@ -107,8 +114,8 @@ body {
   color:#37342E; cursor:pointer;
   transition:background 130ms ease, border-color 130ms ease, color 130ms ease;
 }
-#copy:hover { background:rgba(20,18,14,0.085); border-color:rgba(20,18,14,0.17); }
-#copy:active { background:rgba(20,18,14,0.13); }
+#copy:hover, #copy.hover { background:rgba(20,18,14,0.09); border-color:rgba(20,18,14,0.18); }
+#copy:active, #copy.press { background:rgba(20,18,14,0.14); border-color:rgba(20,18,14,0.22); }
 #copy.done {
   background:rgba(47,107,68,0.11); border-color:rgba(47,107,68,0.26); color:#2F6B44;
 }
@@ -134,12 +141,13 @@ body {
   #head { border-bottom-color:rgba(255,255,255,0.08); }
   #grab { background:rgba(255,255,255,0.18); }
   #close { color:rgba(255,255,255,0.36); }
-  #close:hover { background:rgba(255,255,255,0.10); color:rgba(255,255,255,0.80); }
-  #close:active { background:rgba(255,255,255,0.16); }
+  #close:hover, #close.hover { background:rgba(255,255,255,0.11); color:rgba(255,255,255,0.82); }
+  #close:active, #close.press { background:rgba(255,255,255,0.17); }
+  #text::selection { background:rgba(96,150,240,0.32); }
   #foot { border-top-color:rgba(255,255,255,0.08); }
   #copy { background:rgba(255,255,255,0.06); border-color:rgba(255,255,255,0.12); color:#DAD6CF; }
-  #copy:hover { background:rgba(255,255,255,0.11); border-color:rgba(255,255,255,0.19); }
-  #copy:active { background:rgba(255,255,255,0.16); }
+  #copy:hover, #copy.hover { background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.20); }
+  #copy:active, #copy.press { background:rgba(255,255,255,0.17); border-color:rgba(255,255,255,0.26); }
   #copy.done { background:rgba(120,200,150,0.13); border-color:rgba(120,200,150,0.28); color:#8FD5AC; }
   #text::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.17); background-clip:content-box; }
   #text::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.28); background-clip:content-box; }
@@ -156,18 +164,50 @@ body {
   __FOOT__
 </div>
 <script>
+var IDS = ['copy','close'];
 function send(m){ window.webkit.messageHandlers.ru2enReader.postMessage(m); }
+function selectionText(){
+  var s = window.getSelection();
+  return s ? s.toString() : '';
+}
+function copyLabel(){
+  return selectionText().length > 0 ? 'Скопировать выделенное' : 'Скопировать';
+}
+function setHover(id){
+  IDS.forEach(function(k){
+    var e = document.getElementById(k);
+    if (e) e.classList.toggle('hover', k === id);
+  });
+}
+function setPress(id){
+  IDS.forEach(function(k){
+    var e = document.getElementById(k);
+    if (e) e.classList.toggle('press', k === id);
+  });
+}
 function flashCopied(){
-  var b=document.getElementById('copy'); if(!b) return;
-  b.textContent='Скопировано'; b.classList.add('done');
-  setTimeout(function(){ b.textContent='Скопировать'; b.classList.remove('done'); }, 1400);
+  var b = document.getElementById('copy'); if(!b) return;
+  b.textContent = 'Скопировано'; b.classList.add('done');
+  setTimeout(function(){ b.textContent = copyLabel(); b.classList.remove('done'); }, 1400);
+}
+function controlRects(){
+  var out = {};
+  IDS.forEach(function(k){
+    var e = document.getElementById(k);
+    if (e) { var b = e.getBoundingClientRect(); out[k] = {x:b.left, y:b.top, w:b.width, h:b.height}; }
+  });
+  return JSON.stringify(out);
 }
 (function(){
-  var s=window.getSelection(); if(s) s.removeAllRanges();
-  var c=document.getElementById('copy');
-  if(c) c.addEventListener('click', function(){ send('copy'); });
-  var x=document.getElementById('close');
-  if(x) x.addEventListener('click', function(){ send('close'); });
+  var s = window.getSelection(); if (s) s.removeAllRanges();
+  var c = document.getElementById('copy');
+  if (c) c.addEventListener('click', function(){ send({action:'copy', selection:selectionText()}); });
+  var x = document.getElementById('close');
+  if (x) x.addEventListener('click', function(){ send({action:'close'}); });
+  document.addEventListener('selectionchange', function(){
+    var b = document.getElementById('copy');
+    if (b && !b.classList.contains('done')) b.textContent = copyLabel();
+  });
 })();
 </script>
 </body></html>]]
@@ -205,6 +245,14 @@ local function render(bodyHtml, withFoot)
   return (string.gsub(TEMPLATE, "__(%u+)__", function(k)
     return vars[k] or ""
   end))
+end
+
+local function setFrame(rect)
+  if not view then
+    return
+  end
+  view:frame(rect)
+  frameCache = rect
 end
 
 local function place(cardHeight)
@@ -251,16 +299,42 @@ local function place(cardHeight)
   return { x = x, y = y, w = winW, h = winH }
 end
 
+local function refreshControls()
+  if not view then
+    return
+  end
+  view:evaluateJavaScript("controlRects()", function(result)
+    if type(result) ~= "string" then
+      return
+    end
+    local ok, decoded = pcall(hs.json.decode, result)
+    if ok and type(decoded) == "table" then
+      controls = decoded
+    end
+  end)
+end
+
 local function fit()
-  if not view or userSize then
+  if not view then
+    return
+  end
+  if userSize then
+    refreshControls()
     return
   end
   view:evaluateJavaScript(MEASURE_JS, function(result)
     local h = tonumber(result)
     if h and view then
-      view:frame(place(h))
+      setFrame(place(h))
+      refreshControls()
     end
   end)
+end
+
+function M.eval(js, callback)
+  if view then
+    view:evaluateJavaScript(js, callback)
+  end
 end
 
 local function zoneAt(point, frame)
@@ -276,6 +350,22 @@ local function zoneAt(point, frame)
   end
   if point.y <= cy + HEADER_H then
     return "move"
+  end
+  return nil
+end
+
+-- getBoundingClientRect is in viewport coordinates, and the viewport is the
+-- whole window, so subtracting the window origin is all it takes.
+local function controlAt(point, frame)
+  if not controls then
+    return nil
+  end
+  local lx, ly = point.x - frame.x, point.y - frame.y
+  for _, id in ipairs({ "copy", "close" }) do
+    local r = controls[id]
+    if r and lx >= r.x and lx <= r.x + r.w and ly >= r.y and ly <= r.y + r.h then
+      return id
+    end
   end
   return nil
 end
@@ -306,16 +396,24 @@ function M.close()
     view = nil
   end
   dragMode = nil
+  hoverId = nil
+  controls = nil
+  frameCache = nil
   currentText = nil
 end
 
 local function newController()
   local controller = hs.webview.usercontent.new("ru2enReader")
   controller:setCallback(function(message)
-    local action = message and message.body
+    local body = message and message.body
+    local action = type(body) == "table" and body.action or body
+
     if action == "copy" then
-      if currentText then
-        hs.pasteboard.setContents(currentText)
+      -- Whatever the user highlighted wins over the whole translation.
+      local selected = type(body) == "table" and body.selection or nil
+      local payload = (type(selected) == "string" and #selected > 0) and selected or currentText
+      if payload then
+        hs.pasteboard.setContents(payload)
         if view then
           view:evaluateJavaScript("flashCopied()")
         end
@@ -337,15 +435,32 @@ local function onMouse(event)
   -- From the event, not the cursor: the event carries the exact location the
   -- click happened at, which also keeps synthetic events honest in tests.
   local point = event:location() or hs.mouse.absolutePosition()
+  local frame = frameCache or view:frame()
+
+  if kind == types.mouseMoved then
+    local id = controlAt(point, frame)
+    if id ~= hoverId then
+      hoverId = id
+      view:evaluateJavaScript(string.format("setHover(%s)", id and ("'" .. id .. "'") or "null"))
+    end
+    return false
+  end
 
   if kind == types.leftMouseDown then
-    local frame = view:frame()
+    frame = view:frame()
+    frameCache = frame
+    local pressed = controlAt(point, frame)
+    if pressed then
+      view:evaluateJavaScript(string.format("setPress('%s')", pressed))
+    end
+
     local zone = zoneAt(point, frame)
     if zone then
       dragMode = zone
       dragOrigin = { mx = point.x, my = point.y, x = frame.x, y = frame.y, w = frame.w, h = frame.h }
       return false
     end
+
     local inside = point.x >= frame.x and point.x <= frame.x + frame.w
       and point.y >= frame.y and point.y <= frame.y + frame.h
     if not inside and config.reader.close_on_click_outside then
@@ -354,27 +469,28 @@ local function onMouse(event)
     return false
   end
 
-  if not dragMode then
+  if kind == types.leftMouseUp then
+    view:evaluateJavaScript("setPress(null)")
+    if dragMode then
+      dragMode = nil
+      refreshControls()
+      return true
+    end
     return false
   end
 
-  if kind == types.leftMouseDragged then
+  if kind == types.leftMouseDragged and dragMode then
     local pad = config.reader.padding
     local dx, dy = point.x - dragOrigin.mx, point.y - dragOrigin.my
     if dragMode == "move" then
-      view:frame({ x = dragOrigin.x + dx, y = dragOrigin.y + dy, w = dragOrigin.w, h = dragOrigin.h })
+      setFrame({ x = dragOrigin.x + dx, y = dragOrigin.y + dy, w = dragOrigin.w, h = dragOrigin.h })
     else
       local w = math.max(MIN_CARD_W + pad * 2, dragOrigin.w + dx)
       local h = math.max(MIN_CARD_H + pad * 2, dragOrigin.h + dy)
-      view:frame({ x = dragOrigin.x, y = dragOrigin.y, w = w, h = h })
+      setFrame({ x = dragOrigin.x, y = dragOrigin.y, w = w, h = h })
       userSize = { w = w - pad * 2, h = h - pad * 2 }
     end
     -- Swallowed so the app underneath does not start selecting text.
-    return true
-  end
-
-  if kind == types.leftMouseUp then
-    dragMode = nil
     return true
   end
 
@@ -385,12 +501,16 @@ function M.show(anchor)
   M.close()
   anchorRect = anchor
 
-  view = hs.webview.new(place(config.reader.min_height), { developerExtrasEnabled = false }, newController())
+  local rect = place(config.reader.min_height)
+  view = hs.webview.new(rect, { developerExtrasEnabled = false }, newController())
+  frameCache = rect
   view:windowStyle({ "borderless", "nonactivating" })
   view:level(hs.drawing.windowLevels.floating)
   view:shadow(false)
   view:transparent(true)
-  view:allowTextEntry(false)
+  -- Lets the web content take first responder, which is what makes
+  -- click-dragging a selection inside the text work.
+  view:allowTextEntry(true)
   view:allowGestures(false)
   view:html(render('<span class="muted">перевожу…</span>', false))
   view:show()
@@ -403,6 +523,7 @@ function M.show(anchor)
     hs.eventtap.event.types.leftMouseDown,
     hs.eventtap.event.types.leftMouseDragged,
     hs.eventtap.event.types.leftMouseUp,
+    hs.eventtap.event.types.mouseMoved,
   }, onMouse)
   mouseTap:start()
 end
