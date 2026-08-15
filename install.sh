@@ -11,8 +11,24 @@ say() { printf '==> %s\n' "$1"; }
 
 # macOS ships no timeout(1). Hammerspoon stops answering the ipc socket while
 # it holds a modal permission dialog, so every hs call needs a cap or the
-# installer hangs forever on a machine nobody is sitting at.
-run_capped() { perl -e 'alarm shift; exec @ARGV' "$@" 2>/dev/null; }
+# installer hangs forever on a machine nobody is sitting at. Perl handles the
+# alarm itself and exits normally, otherwise the shell reports "Alarm clock"
+# and set -e kills the run.
+run_capped() {
+  local secs="$1"
+  shift
+  perl -e '
+    my $t = shift;
+    my $pid = fork();
+    exit 1 unless defined $pid;
+    if ($pid == 0) { exec @ARGV or exit 127 }
+    $SIG{ALRM} = sub { kill "TERM", $pid; waitpid($pid, 0); exit 124 };
+    alarm $t;
+    waitpid($pid, 0);
+    alarm 0;
+    exit($? >> 8);
+  ' "$secs" "$@" 2>/dev/null || true
+}
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "ru2en is macOS only" >&2
