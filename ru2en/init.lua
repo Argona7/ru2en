@@ -69,6 +69,25 @@ local function paste(text)
   end)
 end
 
+local function focusedWindowId()
+  local win = hs.window.focusedWindow()
+  return win and win:id() or nil
+end
+
+-- A translation takes about a second, which is long enough to switch apps.
+-- Pasting then would drop english into whatever happens to be in front, so
+-- the text goes to the clipboard instead and the user is told.
+local function pasteInto(targetId, text)
+  local currentId = focusedWindowId()
+  if targetId and currentId and currentId ~= targetId then
+    hs.pasteboard.setContents(text)
+    hideSpinner()
+    hs.alert.show("ru2en: окно сменилось, перевод в буфере", ALERT_STYLE, hs.screen.mainScreen(), 2.5)
+    return
+  end
+  paste(text)
+end
+
 function M.translate(original, onDone)
   onDone = onDone or paste
 
@@ -114,7 +133,10 @@ function M.translateClipboard(opts)
     return fail("too long: " .. chars .. " chars, limit is " .. config.max_chars)
   end
 
-  M.translate(text)
+  local target = focusedWindowId()
+  M.translate(text, function(result)
+    pasteInto(target, result)
+  end)
 end
 
 -- Unlike the double tap, this fires on a selection the user never copied,
@@ -164,10 +186,12 @@ local function onKey(event)
   if selection.isSynthesizing() then
     return false
   end
-  if event:getKeyCode() ~= selection.KEY_C then
-    return false
-  end
-  if not event:getFlags():containExactly({ "cmd" }) then
+
+  local isCmdC = event:getKeyCode() == selection.KEY_C and event:getFlags():containExactly({ "cmd" })
+  if not isCmdC then
+    -- Anything else in between breaks the gesture. Without this, copy, paste,
+    -- copy inside 400ms would read as a double tap.
+    lastCmdC = 0
     return false
   end
 
@@ -178,7 +202,12 @@ local function onKey(event)
     lastCmdC = 0
     local baseline = hs.pasteboard.changeCount()
     selection.afterPasteboardSettles(baseline, function()
-      M.translateClipboard()
+      -- changeCount only moves if the copy landed. Without this a double tap
+      -- with nothing selected would translate whatever was already on the
+      -- clipboard and paste it over the cursor.
+      if hs.pasteboard.changeCount() > baseline then
+        M.translateClipboard()
+      end
     end)
   else
     lastCmdC = now
