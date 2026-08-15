@@ -54,8 +54,12 @@ if pgrep -xq Hammerspoon; then
   killall Hammerspoon
   sleep 2
 fi
-open -a Hammerspoon
-sleep 5
+# Right after a fresh cask install LaunchServices has not indexed the bundle
+# yet, so "open -a Hammerspoon" fails by name. Launch by path instead.
+if ! open /Applications/Hammerspoon.app 2>/dev/null; then
+  open -a Hammerspoon
+fi
+sleep 6
 
 if command -v hs >/dev/null 2>&1; then
   hs -c 'hs.autoLaunch(true)' >/dev/null 2>&1 || true
