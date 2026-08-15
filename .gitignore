@@ -1,0 +1,6 @@
+.DS_Store
+*.log
+
+# scratch prompts produced while A/B testing
+ru2en/prompt.candidate*.txt
+ru2en/prompt.previous.txt
