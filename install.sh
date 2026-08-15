@@ -99,5 +99,8 @@ else
   echo "macOS only reads that permission at launch, so restart it afterwards:"
   echo "  killall Hammerspoon; sleep 2; open /Applications/Hammerspoon.app"
   echo
+  echo "Then run this script once more. Autostart could not be enabled yet:"
+  echo "Hammerspoon ignores the ipc socket while the permission dialog is up."
+  echo
   echo "Verify with:  hs -c 'require(\"ru2en\").doctor()'"
 fi
